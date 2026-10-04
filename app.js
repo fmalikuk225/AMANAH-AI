@@ -128,15 +128,35 @@ function cleanJSON(s){
   const m=s.match(/\{[\s\S]*\}/); if(!m) return null;
   try{return JSON.parse(m[0])}catch{return null}
 }
+const AMANAH_AI_ENDPOINT='https://amanah-ai-rag.fmalikuk225.workers.dev/';
 async function runGroundedAI(txt, docs){
   if(!docs?.length) throw new Error('No relevant approved evidence retrieved');
-  if(!window.puter?.ai?.chat) throw new Error('AI service unavailable');
-  const evidence=docs.map((d,i)=>`E${i+1} | ${d.source}\n${d.text}\nURL: ${d.url}`).join('\n\n');
-  const prompt=`You are the constrained analysis layer inside AMANAH AI, an educational Islamic digital-resilience tool.\n\nUSER CONTENT:\n${txt}\n\nRETRIEVED APPROVED EVIDENCE:\n${evidence}\n\nRULES:\n- Use ONLY the retrieved evidence above. Do not use model memory as religious evidence.\n- Do NOT issue a fatwa, halal/haram verdict, or certify the user's religious claim true or false.\n- Do NOT invent Quran verses, hadith, scholars, institutions, citations, URLs, or facts.\n- Your task is trust-risk analysis: explain whether the content needs source/context verification and why.\n- If retrieved evidence cannot determine the claim, explicitly say so.\n- Keep it concise and educational.\n- Return ONLY valid JSON, no markdown, with this schema:\n{"summary":"max 45 words","grounding":"max 45 words","next_step":"max 25 words"}`;
-  const resp=await puter.ai.chat(prompt,{temperature:0.1,max_tokens:220});
-  const parsed=cleanJSON(responseText(resp));
-  if(!parsed?.summary||!parsed?.grounding||!parsed?.next_step) throw new Error('Invalid grounded response');
-  return parsed;
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),12000);
+  try{
+    const evidence=docs.slice(0,4).map(d=>({
+      title:d.source,
+      excerpt:d.text,
+      source:d.source,
+      url:d.url
+    }));
+    const res=await fetch(AMANAH_AI_ENDPOINT,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({content:txt,evidence,language:st.lang}),
+      signal:controller.signal
+    });
+    const payload=await res.json().catch(()=>null);
+    if(!res.ok) throw new Error(`AI endpoint returned ${res.status}`);
+    if(payload?.mode!=='live_ai'||!payload?.grounded||!payload?.analysis?.summary||!payload?.analysis?.next_step) throw new Error('Invalid grounded response');
+    return {
+      summary:String(payload.analysis.summary),
+      grounding:Array.isArray(payload.analysis.trust_signals)&&payload.analysis.trust_signals.length
+        ? payload.analysis.trust_signals.join(' • ')
+        : String(payload.analysis.boundary||'Grounded in the retrieved approved evidence.'),
+      next_step:String(payload.analysis.next_step)
+    };
+  } finally { clearTimeout(timeout); }
 }
 async function analyseCheck(){
   const el=document.getElementById('checkInput'),txt=(el?.value||'').trim(); st.checkText=txt;
